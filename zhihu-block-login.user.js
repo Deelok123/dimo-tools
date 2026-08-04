@@ -3,7 +3,7 @@
 // @name:zh-CN   知乎屏蔽登录弹窗
 // @name:en      Zhihu Block Login Modal
 // @namespace    https://example.com/zhihu-block-login
-// @version      1.0.0
+// @version      1.1.0
 // @description  屏蔽知乎网页端登录/注册弹窗及其遮罩层，并恢复被锁定的页面滚动
 // @author       you
 // @match        https://zhihu.com/*
@@ -27,7 +27,11 @@
     ];
 
     // 手机端需拦截的弹窗内容关键词（MobileModal 为手机端通用弹窗容器）
-    const MOBILE_MODAL_KEYWORDS = ['登录', '注册', '阅读全文', 'App 内', '打开 App', '立即查看'];
+    // 涵盖：登录注册、App 阅读全文引导、关注作者、分享面板、复制链接等引导弹窗
+    const MOBILE_MODAL_KEYWORDS = [
+        '登录', '注册', '阅读全文', 'App 内', '打开 App', '立即查看',
+        '关注', '分享到', '复制链接', '取消关注', '关注作者', '邀请回答'
+    ];
 
     // 底部「打开知乎查看更多内容」按钮（类名为动态 hash）
     const FOOTER_OPEN_BTN_TEXT = ['打开知乎', '查看更多内容'];
@@ -55,6 +59,14 @@
         else node.remove();
         // 遮罩层本身无内容，删除无副作用
         document.querySelectorAll('.Modal-backdrop').forEach(b => b.remove());
+    }
+
+    // 删除弹窗节点，连同其指定的 wrapper 壳一起移除
+    // 知乎删除弹窗内容后常残留透明容器盖住页面，需要连壳删除
+    function removeWithWrapper(node, wrapperSelector) {
+        const wrapper = node.closest(wrapperSelector);
+        if (wrapper) wrapper.remove();
+        else node.remove();
     }
 
     // 恢复被知乎锁定的滚动
@@ -111,6 +123,18 @@
     function installClickGuard() {
         document.addEventListener('click', (event) => {
             if (!event.target || !event.target.closest) return;
+
+            // 拦截「查看更多」按钮：点击会跳到 /oia/feed/item/recommend（无文章 ID，无法还原）。
+            // preventDefault + 拦截事件传播，让点击无效果但保留按钮。
+            const viewMore = event.target.closest('.Recommendations-viewMore');
+            if (viewMore || ((event.target.innerText || '').trim() === '查看更多' &&
+                event.target.closest('button, a'))) {
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+                return;
+            }
+
             const a = event.target.closest('a[href*="zhuanlan.zhihu.com/p/"], a[href*="/zhihu.com/answer/"], a[href*="/oia/"]');
             if (a) {
                 event.stopPropagation();
@@ -149,11 +173,12 @@
             }
         });
 
-        // 3. 手机端弹窗（MobileModal）——含登录引导、App 阅读全文引导等，及其遮罩层
+        // 3. 手机端弹窗（MobileModal）——含登录引导、App 阅读全文引导、关注/分享面板等，及其遮罩层
+        //    删除弹窗时连同其 .MobileModal-wrapper 壳一起移除，避免残留透明容器。
         document.querySelectorAll('.MobileModal').forEach(node => {
             const text = node.innerText || '';
             if (MOBILE_MODAL_KEYWORDS.some(k => text.includes(k))) {
-                node.remove();
+                removeWithWrapper(node, '.MobileModal-wrapper');
                 removed = true;
             }
         });
@@ -161,6 +186,17 @@
             b.remove();
             removed = true;
         });
+
+        // 3b. 桌面端 .Modal-wrapper 空壳：知乎删除弹窗内容后常残留这个透明容器盖住全屏，
+        //     会拦截鼠标选择/点击（表现为"文字无法复制、链接无法点击"）。
+        //     仅清理内容为空的空壳，避免误删有实际内容的弹窗。
+        document.querySelectorAll('.Modal-wrapper').forEach(wrapper => {
+            if ((wrapper.innerText || '').trim() === '' && !wrapper.querySelector('.signFlowModal, .LoginModal')) {
+                wrapper.remove();
+                removed = true;
+            }
+        });
+
         // 4. 右下角登录引导卡片
         if (removeCornerLoginCard()) removed = true;
 
