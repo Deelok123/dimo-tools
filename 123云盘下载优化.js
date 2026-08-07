@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         123云盘分享页 · 免付费确认
+// @name         123云盘下载优化
 // @namespace    https://github.com/yourname/userscripts
-// @version      1.4.0
+// @version      1.4.1
 // @description  屏蔽"客户端下载"按钮、二维码按钮、"立即下载 无需登录"横幅和顶部推广横幅；删除底部免责声明；未登录时点击下载弹登录窗，已登录时自动关闭VIP开通弹窗让下载自然进行（桌面端 + 移动端）
 // @author       you
 // @match        *://*.123pan.cn/*
