@@ -2,7 +2,7 @@
 // @name          GitHub Release 下载加速
 // @name:zh-CN    GitHub Release 下载加速
 // @namespace     github-release-accelerator
-// @version       1.0.0
+// @version       1.0.1
 // @description   在 github.com 上点击 Release 资产或源码包下载时，自动把下载链接改写为 gh.jasonzeng.dev 加速镜像，实现无感加速下载。
 // @description:zh-CN  在 github.com 上点击 Release 资产或源码包下载时，自动把下载链接改写为 gh.jasonzeng.dev 加速镜像，实现无感加速下载。
 // @author        you
