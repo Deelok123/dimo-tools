@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         123云盘下载优化
 // @namespace    https://github.com/yourname/userscripts
-// @version      1.4.1
-// @description  屏蔽"客户端下载"按钮、二维码按钮、"立即下载 无需登录"横幅和顶部推广横幅；删除底部免责声明；未登录时点击下载弹登录窗，已登录时自动关闭VIP开通弹窗让下载自然进行（桌面端 + 移动端）
+// @version      1.5.0
+// @description  屏蔽客户端下载/二维码/横幅/广告/SVIP徽章，删除免责声明；未登录点下载弹登录窗，已登录自动关VIP弹窗；阻止网页自动复制到剪切板、阻止跳转下载客户端或强行打开客户端（桌面端+移动端）
 // @author       you
 // @match        *://*.123pan.cn/*
 // @match        *://*.123pan.com/*
@@ -101,6 +101,46 @@
             var overlay = modal.closest('.hmodal-overlay-container, .adm-popup-wrap') || modal;
             overlay.remove();
         });
+
+        // 8) 屏蔽广告
+        //    a) 右侧广告卡片 .web-code-card-adv（内含 share_background/*.png 广告图）
+        //    b) 固定广告横幅 .bg_svip_block_ads（position:fixed 浮层，可能轮换显示）
+        //    c) 页面背景图：123云盘会把 .web-body 等背景设置成广告图（backgroundImage 类），
+        //       清除内联 background-image 防止背景变成广告（点击极易误触发）
+        //    d) 兜底：任何指向广告图片域的元素（share_background / bg_svip_block_ads）一律隐藏
+        document.querySelectorAll('.web-code-card-adv').forEach(function (el) { el.remove(); });
+        document.querySelectorAll('.bg_svip_block_ads').forEach(function (el) { el.remove(); });
+        document.querySelectorAll('.backgroundImage, .web-body.backgroundImage').forEach(function (el) {
+            if (el.getAttribute && el.getAttribute('style')) {
+                el.style.backgroundImage = 'none';
+            }
+        });
+        document.querySelectorAll('img[src*="share_background"], img[src*="bg_svip_block_ads"]').forEach(function (el) {
+            hide(el);
+            if (el.parentElement) el.parentElement.remove();
+        });
+
+        // 9) 屏蔽 SVIP / VIP 会员徽章图片（分享者头像旁的会员标签）
+        //    桌面端 alt="svip"（SVIPLable.png），移动端 alt="user-label"
+        document.querySelectorAll('img[alt="svip"], img[src*="SVIPLable"], img[alt="user-label"]').forEach(function (el) {
+            hide(el);
+        });
+
+        // 10) 屏蔽移动端"APP查看 / 打开APP"入口和客户端引导层
+        //     a) "APP查看"按钮（.header-action-btn--app）→ 隐藏，阻止跳客户端
+        //     b) 客户端引导层：无 class、position:fixed 全屏遮罩，
+        //        文案含"如未正常唤起 / 点击下载 / 下载APP"，直接移除
+        document.querySelectorAll('.header-action-btn--app').forEach(hide);
+        document.querySelectorAll('div').forEach(function (el) {
+            var t = (el.textContent || '').replace(/\s+/g, '').trim();
+            if (el.children.length > 0 && /如未正常唤起|下载APP|点击下载/.test(t)) {
+                var cs = el.getAttribute('style') || '';
+                // 只移除固定全屏的引导遮罩，避免误伤正常页面内容
+                if (cs.indexOf('position: fixed') !== -1 && cs.indexOf('z-index') !== -1) {
+                    el.remove();
+                }
+            }
+        });
     }
 
     // ---------- 登录状态检测 ----------
@@ -134,16 +174,89 @@
     // 已登录用户不拦截，走网站真实流程（VIP 弹窗由上面第 7 条自动关闭）。
     document.addEventListener('click', function (e) {
         var el = e.target;
+        // 拦截下载按钮（未登录时弹登录窗）
         var target = el && el.closest ? el.closest('button, .appBottomBtnNew') : null;
         if (target && isDownloadTarget(target) && !isLoggedIn()) {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
             openLogin();
+            return;
+        }
+
+        // 拦截"APP查看 / 打开App / 客户端"类入口，阻止跳转下载客户端网页或唤起客户端
+        // （主要针对移动端；桌面端"客户端下载"按钮已隐藏，这里兜底拦截点击）
+        var clientBtn = el && el.closest ? el.closest('.header-action-btn--app, a, [class*="client"], [class*="app"]') : null;
+        if (clientBtn && /APP查看|打开App|客户端|下载APP|客户端下载/.test(clientBtn.textContent || '')) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            return;
+        }
+
+        // 拦截指向客户端下载页或 App 协议跳转的链接
+        if (el && el.closest) {
+            var link = el.closest('a[href]');
+            if (link && /Downloadclient|downloadclient|\.apk$|intent:|(pan123|123pan):\/\/|itunes:|play\.google/.test(link.href)) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }
         }
     }, true);
 
-    // ---------- 监听 DOM 变化，处理 React 异步渲染 / 重渲染 ----------
+    // ---------- 阻止网页自动复制到剪切板 ----------
+
+    // 拦截 navigator.clipboard.writeText（异步 API）：调用变成空操作
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText = function () {
+                // 不执行任何复制，返回已解决的 Promise 以保持 API 契约
+                return Promise.resolve();
+            };
+        }
+    } catch (err) { /* 忽略权限异常 */ }
+
+    // 拦截 document.execCommand('copy')（旧式复制）：返回 false 阻止复制
+    // 注意：先保存原始函数再覆盖，避免在覆盖后引用自身造成递归
+    try {
+        var origExecCommand = document.execCommand;
+        if (typeof origExecCommand === 'function') {
+            document.execCommand = function (cmd) {
+                if (cmd === 'copy') return false;
+                // 非复制命令放行（如 'paste' 等）
+                return origExecCommand.apply(this, arguments);
+            };
+        }
+    } catch (err) { /* 忽略 */ }
+
+    // 拦截 window.open：阻止打开客户端下载页/App 引导页等新窗口
+    var origOpen = window.open;
+    window.open = function (url, target, features) {
+        try {
+            if (url && /Downloadclient|downloadclient|\.apk$|intent:|(pan123|123pan):\/\/|itunes:|play\.google/.test(String(url))) {
+                return null;
+            }
+        } catch (err) { /* 忽略 */ }
+        return origOpen ? origOpen.apply(this, arguments) : null;
+    };
+
+    // 拦截 location.href / location.assign / location.replace 跳转到客户端相关地址
+    ['assign', 'replace'].forEach(function (method) {
+        try {
+            var orig = location[method];
+            location[method] = function (url) {
+                try {
+                    if (url && /Downloadclient|downloadclient|\.apk$|intent:|(pan123|123pan):\/\/|itunes:|play\.google/.test(String(url))) {
+                        return;
+                    }
+                } catch (err) { /* 忽略 */ }
+                return orig.apply(location, arguments);
+            };
+        } catch (err) { /* 忽略 */ }
+    });
+
+    // 监听 DOM 变化，处理 React 异步渲染 / 重渲染 ----------
 
     clean();
     new MutationObserver(clean).observe(document.body, { childList: true, subtree: true });
