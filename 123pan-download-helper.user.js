@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         123云盘下载优化
 // @namespace    https://github.com/yourname/userscripts
-// @version      1.5.0
+// @version      1.5.1
 // @description  屏蔽客户端下载/二维码/横幅/广告/SVIP徽章，删除免责声明；未登录点下载弹登录窗，已登录自动关VIP弹窗；阻止网页自动复制到剪切板、阻止跳转下载客户端或强行打开客户端（桌面端+移动端）
 // @author       you
 // @match        *://*.123pan.cn/*
@@ -73,20 +73,21 @@
         // 4) 屏蔽顶部"新用户注册送2T"推广横幅（仅桌面端有 slogan_top.png；class 是混淆哈希，用 src/alt 匹配）
         document.querySelectorAll('img[alt="slogan"], img[src*="slogan_top"]').forEach(hide);
 
-        // 5) 删除底部免责声明（桌面端在 .footer-area 内含 CleanNet 文本）
+        // 5) 隐藏底部免责声明（桌面端在 .footer-area 内含 CleanNet 文本）
         //    注意：移动端 .footer-area.mobile 是底部操作栏（下载/保存按钮），必须保留！
+        //    用 display:none 而非 remove()，避免触碰 React 管理的节点引发崩溃
         if (!mobile) {
             document.querySelectorAll('.footer-area').forEach(function (el) {
-                if (/本页面由用户分享生成|严禁传播/.test(el.textContent)) el.remove();
+                if (/本页面由用户分享生成|严禁传播/.test(el.textContent)) hide(el);
             });
         }
 
-        // 6) 移除付费确认弹窗（未登录点下载出现；桌面/移动端同用 .hmodal-overlay-container）
+        // 6) 隐藏付费确认弹窗（未登录点下载出现；桌面/移动端同用 .hmodal-overlay-container）
         document.querySelectorAll('.hmodal-overlay-container').forEach(function (m) {
-            if (/确认下载|待支付|扫码支付/.test(m.textContent)) m.remove();
+            if (/确认下载|待支付|扫码支付/.test(m.textContent)) hide(m);
         });
 
-        // 7) 自动关闭 VIP 开通弹窗（登录后点下载出现；关闭/移除后底层下载自动进行）
+        // 7) 自动关闭 VIP 开通弹窗（登录后点下载出现；关闭/隐藏后底层下载自动进行）
         //    桌面端 .scheme-e-vip-modal-wrap，移动端 .scheme-e-vip-modal（adm-popup 组件）
         var vipModals = document.querySelectorAll('.scheme-e-vip-modal-wrap, .scheme-e-vip-modal');
         vipModals.forEach(function (modal) {
@@ -97,28 +98,29 @@
                 closeBtn.click();
                 return;
             }
-            // 没有关闭按钮时，直接移除整个弹窗覆盖层
+            // 没有关闭按钮时，隐藏整个弹窗覆盖层（用隐藏而非移除，避免 React 崩溃）
             var overlay = modal.closest('.hmodal-overlay-container, .adm-popup-wrap') || modal;
-            overlay.remove();
+            hide(overlay);
         });
 
         // 8) 屏蔽广告
+        //    注意：只能隐藏（display:none），绝不能 remove()！
+        //    之前用 img[src*="share_background"] 的 parentElement.remove() 误删了整个
+        //    .content-center-body（页面内容主容器），导致 React 崩溃、页面报错。
+        //    广告图片/卡片一律隐藏，不触碰任何父容器。
         //    a) 右侧广告卡片 .web-code-card-adv（内含 share_background/*.png 广告图）
         //    b) 固定广告横幅 .bg_svip_block_ads（position:fixed 浮层，可能轮换显示）
         //    c) 页面背景图：123云盘会把 .web-body 等背景设置成广告图（backgroundImage 类），
         //       清除内联 background-image 防止背景变成广告（点击极易误触发）
-        //    d) 兜底：任何指向广告图片域的元素（share_background / bg_svip_block_ads）一律隐藏
-        document.querySelectorAll('.web-code-card-adv').forEach(function (el) { el.remove(); });
-        document.querySelectorAll('.bg_svip_block_ads').forEach(function (el) { el.remove(); });
+        //    d) 兜底：任何指向广告图片域的元素（share_background / bg_svip_block_ads）隐藏
+        document.querySelectorAll('.web-code-card-adv').forEach(hide);
+        document.querySelectorAll('.bg_svip_block_ads').forEach(hide);
         document.querySelectorAll('.backgroundImage, .web-body.backgroundImage').forEach(function (el) {
             if (el.getAttribute && el.getAttribute('style')) {
                 el.style.backgroundImage = 'none';
             }
         });
-        document.querySelectorAll('img[src*="share_background"], img[src*="bg_svip_block_ads"]').forEach(function (el) {
-            hide(el);
-            if (el.parentElement) el.parentElement.remove();
-        });
+        document.querySelectorAll('img[src*="share_background"], img[src*="bg_svip_block_ads"]').forEach(hide);
 
         // 9) 屏蔽 SVIP / VIP 会员徽章图片（分享者头像旁的会员标签）
         //    桌面端 alt="svip"（SVIPLable.png），移动端 alt="user-label"
@@ -129,15 +131,15 @@
         // 10) 屏蔽移动端"APP查看 / 打开APP"入口和客户端引导层
         //     a) "APP查看"按钮（.header-action-btn--app）→ 隐藏，阻止跳客户端
         //     b) 客户端引导层：无 class、position:fixed 全屏遮罩，
-        //        文案含"如未正常唤起 / 点击下载 / 下载APP"，直接移除
+        //        文案含"如未正常唤起 / 点击下载 / 下载APP"，用隐藏处理（不 remove，避免 React 崩溃）
         document.querySelectorAll('.header-action-btn--app').forEach(hide);
         document.querySelectorAll('div').forEach(function (el) {
             var t = (el.textContent || '').replace(/\s+/g, '').trim();
             if (el.children.length > 0 && /如未正常唤起|下载APP|点击下载/.test(t)) {
                 var cs = el.getAttribute('style') || '';
-                // 只移除固定全屏的引导遮罩，避免误伤正常页面内容
+                // 只隐藏固定全屏的引导遮罩，避免误伤正常页面内容
                 if (cs.indexOf('position: fixed') !== -1 && cs.indexOf('z-index') !== -1) {
-                    el.remove();
+                    hide(el);
                 }
             }
         });
