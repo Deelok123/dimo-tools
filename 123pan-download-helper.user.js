@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         123云盘下载优化
 // @namespace    https://github.com/yourname/userscripts
-// @version      1.6.0
-// @description  屏蔽客户端下载/二维码/横幅/广告/SVIP徽章，删除免责声明；未登录点下载弹登录窗，已登录自动关VIP弹窗；阻止网页自动复制到剪切板、阻止跳转下载客户端或强行打开客户端（桌面端+移动端）
+// @version      1.6.2
+// @description  屏蔽客户端下载/二维码/横幅/广告/SVIP徽章，删除免责声明；未登录点下载弹登录窗，已登录自动关新旧版VIP弹窗和APP下载弹窗；阻止网页自动复制到剪切板、阻止跳转下载客户端或强行打开客户端（桌面端+移动端）
 // @author       you
 // @match        *://*.123pan.cn/*
 // @match        *://*.123pan.com/*
@@ -37,6 +37,9 @@
     function hide(el) {
         if (el && el.style) el.style.display = 'none';
     }
+
+    // 记录已处理过的弹窗元素，防止 MutationObserver + click() 造成死循环
+    var handledModals = new WeakSet();
 
     // 按可见文本精确查找元素（兼容 button 和移动端的 div/span）。
     // 优先返回叶子节点（无元素子节点的才是真正可点击的按钮/文字），
@@ -93,19 +96,45 @@
         });
 
         // 7) 自动关闭 VIP 开通弹窗（登录后点下载出现；关闭/隐藏后底层下载自动进行）
-        //    桌面端 .scheme-e-vip-modal-wrap，移动端 .scheme-e-vip-modal（adm-popup 组件）
-        var vipModals = document.querySelectorAll('.scheme-e-vip-modal-wrap, .scheme-e-vip-modal');
-        vipModals.forEach(function (modal) {
+        //    兼容新旧两代弹窗：
+        //      旧版（桌面/移动）：.scheme-e-vip-modal-wrap / .scheme-e-vip-modal（adm-popup）
+        //      新版（移动端）：   .mfy_h-popup-module__root__* / .h5-either-vip-and-peruse-modal
+        //    注意：用 WeakSet 记录已处理过的弹窗，避免 click() 触发 React 变化后再触发
+        //    MutationObserver 造成无限循环（会把页面卡死）。
+        document.querySelectorAll('.scheme-e-vip-modal-wrap, .scheme-e-vip-modal, .mfy_h-popup-module__root, [class*="h5-either-vip-and-peruse"]').forEach(function (modal) {
+            if (handledModals.has(modal)) return;
+            handledModals.add(modal);
             // 优先点击弹窗自带关闭按钮（触发网站原生关闭逻辑，最稳妥）
-            //    桌面端 .hmodal-close，移动端 .adm-popup-close-button
-            var closeBtn = modal.querySelector('.adm-popup-close-button, .hmodal-close, [aria-label="Close"]');
+            //    旧版 .hmodal-close / .adm-popup-close-button，新版 [class*="closeButton"]
+            var closeBtn = modal.querySelector('.adm-popup-close-button, .hmodal-close, [class*="closeButton"], [aria-label="Close"]');
             if (closeBtn) {
                 closeBtn.click();
                 return;
             }
             // 没有关闭按钮时，隐藏整个弹窗覆盖层（用隐藏而非移除，避免 React 崩溃）
-            var overlay = modal.closest('.hmodal-overlay-container, .adm-popup-wrap') || modal;
+            var overlay = modal.closest('.hmodal-overlay-container, .adm-popup-wrap, .mfy_h-popup-module__wrap') || modal;
             hide(overlay);
+        });
+
+        // 7b) 自动处理"保留策略 / APP下载"弹窗（新版移动端下载的第二层弹窗）
+        //    推广"使用APP下载更快更稳"（流量减半），点「暂不下载」继续浏览器下载
+        document.querySelectorAll('.retain-policy-modal, [class*="retain-policy"]').forEach(function (modal) {
+            if (handledModals.has(modal)) return;
+            handledModals.add(modal);
+            // 优先点「暂不下载」按钮（网站原生逻辑，触发后续下载流程）
+            var cancelBtn = modal.querySelector('[class*="buttons-cancel"], [class*="btn-cancel"]');
+            if (cancelBtn) {
+                cancelBtn.click();
+                return;
+            }
+            // 没有取消按钮时，点击关闭按钮
+            var closeBtn = modal.querySelector('[class*="close"]');
+            if (closeBtn) {
+                closeBtn.click();
+                return;
+            }
+            // 兜底：隐藏整个弹窗
+            hide(modal);
         });
 
         // 8) 屏蔽广告
@@ -287,5 +316,16 @@
     // 监听 DOM 变化，处理 React 异步渲染 / 重渲染 ----------
 
     clean();
-    new MutationObserver(clean).observe(document.body, { childList: true, subtree: true });
+    // 用 requestAnimationFrame 节流：clean() 会在 React 重渲染期间被高频调用，
+    // 直接同步执行会占用主线程（尤其 clean() 里要遍历所有 div）。
+    // 每次帧只执行一次，避免卡顿和潜在的循环。
+    var cleanScheduled = false;
+    new MutationObserver(function () {
+        if (cleanScheduled) return;
+        cleanScheduled = true;
+        requestAnimationFrame(function () {
+            cleanScheduled = false;
+            clean();
+        });
+    }).observe(document.body, { childList: true, subtree: true });
 })();
