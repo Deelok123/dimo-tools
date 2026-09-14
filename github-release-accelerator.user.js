@@ -2,7 +2,7 @@
 // @name          GitHub Release 下载加速
 // @name:zh-CN    GitHub Release 下载加速
 // @namespace     github-release-accelerator
-// @version       1.5.1
+// @version       1.5.3
 // @description   加速 GitHub 的 Release 文件、源码包、raw 文件与 gist 文件下载，点击即可下载，支持多条加速线路。
 // @description:zh-CN  加速 GitHub 的 Release 文件、源码包、raw 文件与 gist 文件下载，点击即可下载，支持多条加速线路。
 // @author        you
@@ -119,7 +119,9 @@
         .option.done { background: rgba(52, 130, 255, .1); }
         .option.done .status { opacity: 1; }
         @media (max-width: 600px) {
-          .card { left: 12px; right: 12px; width: auto; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); border-radius: 20px; }
+          /* 移动端：浏览器把底栏之外的内容区当视口，贴着底部即可；
+             env() 只为 iOS 横屏/悬浮栏时避开 home 指示条 */
+          .card { left: 12px; right: 12px; width: auto; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); border-radius: 20px; }
           .option { padding: 14px 16px; font-size: 15px; }
           .close { width: 30px; height: 30px; line-height: 28px; font-size: 17px; }
         }
