@@ -2,9 +2,9 @@
 // @name          GitHub Release 下载加速
 // @name:zh-CN    GitHub Release 下载加速
 // @namespace     github-release-accelerator
-// @version       1.0.1
-// @description   在 github.com 上点击 Release 资产或源码包下载时，自动把下载链接改写为 gh.jasonzeng.dev 加速镜像，实现无感加速下载。
-// @description:zh-CN  在 github.com 上点击 Release 资产或源码包下载时，自动把下载链接改写为 gh.jasonzeng.dev 加速镜像，实现无感加速下载。
+// @version       1.5.1
+// @description   加速 GitHub 的 Release 文件、源码包、raw 文件与 gist 文件下载，点击即可下载，支持多条加速线路。
+// @description:zh-CN  加速 GitHub 的 Release 文件、源码包、raw 文件与 gist 文件下载，点击即可下载，支持多条加速线路。
 // @author        you
 // @match         https://github.com/*
 // @match         https://www.github.com/*
@@ -19,25 +19,23 @@
 (function () {
   'use strict';
 
-  // ===== 可配置 =====
-  // 加速镜像域名。想换别的加速站（如 ghproxy.com / gh-proxy.com 等）只需改这一行。
-  const HOST = 'gh.jasonzeng.dev';
-  const PREFIX = `https://${HOST}/`;
+  // ===== 线路 =====
+  const DEFAULT_PROXY = 'cdn.gh-proxy.org';                 // 点击时立刻走的默认线路
+  const ALT_PROXIES = ['gh-proxy.org', 'v6.gh-proxy.org'];  // 卡片里提供的备用线路（顺序即展示顺序）
+  const ALL_PROXIES = [DEFAULT_PROXY].concat(ALT_PROXIES);
 
-  // ===== 命中即加速的链接形态（对应加速站首页 pattern，全部支持）=====
-  // 下载型（mousedown 即改写，点击时替换，最无感）：
-  //   github.com/<owner>/<repo>/releases/download/<tag>/<file>  —— Release 资产
-  //   github.com/<owner>/<repo>/archive/...                     —— Source code (zip / tar.gz) 源码包
-  //   github.com/<owner>/<repo>/raw/...                         —— 仓库 raw 文件
-  //   raw.githubusercontent.com/<owner>/<repo>/...              —— raw 直链
-  //   gist.githubusercontent.com/<user>/<id>/...                 —— gist 的 raw 文件
-  //   gist.github.com/<user>/<id>/.../raw/...                   —— gist raw（显式 /raw/ 段）
-  // 页面型（导航时兜底改写，避免整页下载）：
-  //   github.com/<owner>/<repo>/suites/...                       —— Actions artifact suites
-  //   github.com/<owner>/<repo>/blob/<ref>/<path>                —— 文件页（代理会 302 到 raw 再附件下载）
-  //   gist.github.com/<user>/<id>                               —— gist 页面
-  //
-  // 注意：blob 的路径中不能出现 /raw/，否则会匹配到下方的 raw 规则，导致整页被当文件下载。
+  // 用一条正则判断"是否已是加速地址"，比数组 some+startsWith 更快
+  const PROXY_RE = new RegExp(
+    '^https://(?:' + ALL_PROXIES.map((h) => h.replace(/\./g, '\\.')).join('|') + ')/'
+  );
+  const isProxyUrl = (href) => PROXY_RE.test(href);
+  const accelUrl = (href, host) => `https://${host}/${href}`;
+
+  // ===== 链接形态（正则只编译一次）=====
+  // 下载型：
+  //   github.com/<owner>/<repo>/releases/download/...  |  /archive/...  |  /raw/...
+  //   raw.githubusercontent.com/...  |  gist.githubusercontent.com/...  |  gist.github.com/.../raw/...
+  // 注意：blob 路径中不能出现 /raw/，否则会被当成整页下载。
   const DOWNLOAD_RE = new RegExp(
     '^(?:https://)?' +
     '(?:' +
@@ -47,98 +45,188 @@
       '|gist\\.github\\.com/[^/]+/[^/]+/[^/]+/raw/' +
     ').+'
   );
-  // 页面型：非下载页，仅"整页导航"时改写；若恰好是 .tar/.zip 等二进制，则视为下载，不做限制
+  // 页面型：正常打开是"浏览页面"，只有"直接打开新页"时才改走默认线路
   const PAGE_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:suites|blob(?!\/))\/|^https:\/\/gist\.github\.com\/[^/]+\/[^/]+$/;
-  // 以这些扩展名结尾的 blob 仍按下载处理（代理对文件页会 302 到 raw，整页导航会下载，而非渲染）
   const BLOB_DL_EXT = /\.(tar\.gz|zip|tar|7z|gz|bz2|xz|exe|msi|deb|rpm|dmg|pkg|apk|aab|whl|jar|war|appimage|bin|iso|pdf|txt|md|json|yaml|yml|xml|html?|sh|py|js|ts|go|rs|java|c|h|cpp|hpp|rb|php|sql)$/i;
 
-  // 该链接是否应改写为加速地址；同时返回改写的目标地址（避免二次正则匹配）
-  function toAccel(href) {
-    if (!isOn()) return null;
-    if (!href) return null;
-    if (href.startsWith(PREFIX)) return null; // 已在加速域，防止套娃
-    const m = href.match(DOWNLOAD_RE);
-    if (m) return PREFIX + href;
-    // 页面型：仅当整页导航到该地址时才改写；若目标扩展名是二进制则视为下载，也改写
-    if (PAGE_RE.test(href) && !BLOB_DL_EXT.test(href)) return PREFIX + href;
-    return null;
-  }
+  // ===== 开关：读一次缓存在内存，避免每次点击都同步调用 GM_getValue =====
+  let enabled = GM_getValue('accel_enabled', true);
 
-  // 判断这是不是"下载型"改写（下载型提前到 mousedown 处理；页面型留到导航时兜底）
-  function isDownloadUrl(href) {
-    return !!href && !href.startsWith(PREFIX) && !!href.match(DOWNLOAD_RE);
-  }
-
-  // ===== 全局开关（默认开启，油猴菜单里可随时切换）=====
-  const isOn = () => GM_getValue('accel_enabled', true);
-
-  // 捕获阶段改写链接。只针对"被点击的那一个 <a>"，不做全局扫描，无性能开销。
-  // 页面型（blob/gist/suites）：仅当"整页导航"到该地址时改写——但浏览器在捕获阶段
-  // 无法确定最终是否会发生导航，因此这里只改 href，若最终跳走则走加速，若页面原地
-  // 渲染（无导航）则 href 已被改但页面没动，无害。二进制扩展名仍按下载处理。
-  function rewrite(e) {
+  function closestAnchor(e) {
     const t = e.target;
-    if (!t || typeof t.closest !== 'function') return;
-    const a = t.closest('a[href]');
-    if (!a) return;
-    const acc = toAccel(a.href);
-    if (acc) a.href = acc;
+    if (!t || typeof t.closest !== 'function') return null;
+    return t.closest('a[href]');
   }
 
-  // 下载型：提前到 mousedown 改写，覆盖 左/中/右键 与触摸。
-  // 下载型不走 click 兜底，避免 popup 里被 react 重新渲染、href 被重置的问题。
-  function preDownload(e) {
-    const t = e.target;
-    if (!t || typeof t.closest !== 'function') return;
-    const a = t.closest('a[href]');
-    if (!a) return;
-    // a.href 为绝对化完整地址；仅当命中下载型且改写成功时才标记处理过
-    const href = a.href;
-    if (!isDownloadUrl(href)) return;
-    const acc = toAccel(href);
-    if (acc) {
-      a.href = acc;
-      // 记录原始地址，供 click 阶段校验"是否确实发生了导航"（整页下载场景兜底）
-      a.setAttribute('data-accel-orig', href);
-    }
+  // 用指定线路触发下载（代理返回 Content-Disposition: attachment，不会跳转页面）
+  function startDownload(url) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
-  // 兜底：mousedown 已改写 href，但若该次点击最终没触发导航
-  // （浏览器按原始地址处理、或外部工具捕获了事件），则手动补发一次下载。
-  // 只针对"下载型"链接，不会误伤页面导航。
-  function ensureDownload(e) {
-    const t = e.target;
-    if (!t || typeof t.closest !== 'function') return;
-    const a = t.closest('a[href]');
-    if (!a) return;
-    const orig = a.getAttribute('data-accel-orig');
-    if (!orig) return;
-    const acc = toAccel(a.href);
-    if (!acc) return;
-    // 若此次点击没有触发导航，则直接下载加速地址
-    if (e.detail > 0 || e.button === 0) {
-      // 等待微任务后确认没有发生导航（导航会让当前文档被卸载）
-      setTimeout(() => {
-        if (document.visibilityState !== 'hidden' && !document.hidden) {
-          const dl = document.createElement('a');
-          dl.href = acc;
-          dl.download = '';
-          document.body.appendChild(dl);
-          dl.click();
-          dl.remove();
+  // ===== 备用线路卡片（miuix 风格，Shadow DOM 隔离；不遮挡页面、不打断下载）=====
+  let cardHost = null;
+  let cardShadow = null;
+  let cardUrl = null;
+
+  function buildCard() {
+    cardHost = document.createElement('div');
+    cardHost.style.cssText = 'all: initial;';
+    cardShadow = cardHost.attachShadow({ mode: 'open' });
+    cardShadow.innerHTML = `
+      <style>
+        .card {
+          position: fixed; right: 20px; bottom: 20px; z-index: 2147483647;
+          width: 296px; max-width: calc(100vw - 24px); box-sizing: border-box;
+          padding: 16px 16px 12px; border-radius: 24px;
+          background: rgba(255, 255, 255, .88);
+          -webkit-backdrop-filter: blur(24px) saturate(1.8);
+          backdrop-filter: blur(24px) saturate(1.8);
+          box-shadow: 0 8px 32px rgba(0, 0, 0, .16), 0 0 0 .5px rgba(0, 0, 0, .05);
+          color: rgba(0, 0, 0, .9);
+          font-family: MiSans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                       "PingFang SC", "Microsoft YaHei", sans-serif;
+          display: none; animation: accel-in .28s cubic-bezier(.2, .9, .3, 1.15);
         }
-      }, 0);
+        @keyframes accel-in { from { opacity: 0; transform: translateY(12px) scale(.97) } to { opacity: 1; transform: none } }
+        .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+        .title { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+        .close {
+          flex: none; width: 24px; height: 24px; line-height: 22px; text-align: center;
+          border-radius: 50%; cursor: pointer; color: rgba(0, 0, 0, .4);
+          font-size: 15px; user-select: none; transition: background .15s ease;
+        }
+        .close:hover { background: rgba(0, 0, 0, .07); color: rgba(0, 0, 0, .7); }
+        .file {
+          margin: 3px 0 12px; font-size: 12px; color: rgba(0, 0, 0, .45);
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .list { display: flex; flex-direction: column; gap: 8px; }
+        .option {
+          display: flex; align-items: center; justify-content: space-between; gap: 8px;
+          padding: 12px 14px; border-radius: 16px; background: rgba(0, 0, 0, .045);
+          cursor: pointer; font-size: 14px; line-height: 1.2; user-select: none;
+          transition: background .15s ease, transform .08s ease;
+        }
+        .option:hover { background: rgba(0, 0, 0, .075); }
+        .option:active { transform: scale(.985); }
+        .option .status { flex: none; font-size: 12px; color: #3482ff; font-weight: 600; opacity: 0; transition: opacity .15s ease; }
+        .option.done { background: rgba(52, 130, 255, .1); }
+        .option.done .status { opacity: 1; }
+        @media (max-width: 600px) {
+          .card { left: 12px; right: 12px; width: auto; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); border-radius: 20px; }
+          .option { padding: 14px 16px; font-size: 15px; }
+          .close { width: 30px; height: 30px; line-height: 28px; font-size: 17px; }
+        }
+        @media (prefers-color-scheme: dark) {
+          .card { background: rgba(32, 32, 35, .88); color: rgba(255, 255, 255, .92);
+                  box-shadow: 0 8px 32px rgba(0, 0, 0, .5), 0 0 0 .5px rgba(255, 255, 255, .06); }
+          .file { color: rgba(255, 255, 255, .45); }
+          .close { color: rgba(255, 255, 255, .4); }
+          .close:hover { background: rgba(255, 255, 255, .1); color: rgba(255, 255, 255, .8); }
+          .option { background: rgba(255, 255, 255, .07); }
+          .option:hover { background: rgba(255, 255, 255, .12); }
+          .option.done { background: rgba(90, 150, 255, .18); }
+          .option .status { color: #7aa9ff; }
+        }
+      </style>
+      <div class="card">
+        <div class="head">
+          <div class="title">换个线路下载</div>
+          <div class="close" title="关闭">✕</div>
+        </div>
+        <div class="file"></div>
+        <div class="list"></div>
+      </div>`;
+
+    const list = cardShadow.querySelector('.list');
+    ALT_PROXIES.forEach((host) => {
+      const row = document.createElement('div');
+      row.className = 'option';
+      const name = document.createElement('span');
+      name.textContent = host;
+      const status = document.createElement('span');
+      status.className = 'status';
+      status.textContent = '已发起 ✓';
+      row.appendChild(name);
+      row.appendChild(status);
+      // 点选后「不关闭」卡片，只标记该线路，方便一条不行再点另一条
+      row.addEventListener('click', () => {
+        if (!cardUrl) return;
+        startDownload(accelUrl(cardUrl, host));
+        Array.from(list.children).forEach((c) => c.classList.remove('done'));
+        row.classList.add('done');
+      });
+      list.appendChild(row);
+    });
+
+    cardShadow.querySelector('.close').addEventListener('click', hideCard);
+    document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') hideCard(); }, true);
+    document.documentElement.appendChild(cardHost);
+  }
+
+  function showCard(url) {
+    if (!cardHost) buildCard();
+    cardUrl = url;
+    cardShadow.querySelector('.file').textContent = url.split('/').pop() || url;
+    // 每次打开时清掉上一次的"已发起"标记
+    Array.from(cardShadow.querySelectorAll('.option')).forEach((c) => c.classList.remove('done'));
+    cardShadow.querySelector('.card').style.display = 'block';
+  }
+
+  function hideCard() {
+    cardUrl = null;
+    if (cardShadow) cardShadow.querySelector('.card').style.display = 'none';
+  }
+
+  // ===== 点击处理 =====
+  // mousedown：下载型链接立刻改走默认线路（旧逻辑，浏览器随即开始下载）。
+  // 只处理左键/中键，避免右键菜单里的"复制链接"也被改写。
+  function onMouseDown(e) {
+    if (!enabled || (e.button !== 0 && e.button !== 1)) return;
+    const a = closestAnchor(e);
+    if (!a || isProxyUrl(a.href) || !DOWNLOAD_RE.test(a.href)) return;
+    const orig = a.href;
+    a.setAttribute('data-accel-orig', orig);
+    a.href = accelUrl(orig, DEFAULT_PROXY);
+  }
+
+  function onClick(e) {
+    if (!enabled) return;
+    const a = closestAnchor(e);
+    if (!a) return;
+    const plainLeft = e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
+
+    // 已在 mousedown 阶段改写过 → 这里只负责弹卡片（不改写、不拦截下载）
+    const marked = a.getAttribute('data-accel-orig');
+    if (marked) {
+      if (plainLeft) showCard(marked);
+      return;
+    }
+    if (isProxyUrl(a.href)) return;
+
+    // 未经过 mousedown（键盘 Enter 等）：先改走默认线路，再弹卡片
+    if (DOWNLOAD_RE.test(a.href)) {
+      const orig = a.href;
+      a.setAttribute('data-accel-orig', orig);
+      a.href = accelUrl(orig, DEFAULT_PROXY);
+      if (plainLeft) showCard(orig);
+      return;
+    }
+
+    // 页面型（blob/gist/suites）：普通左键正常浏览；只有"直接打开新页"时才改走默认线路
+    if (!plainLeft && PAGE_RE.test(a.href) && !BLOB_DL_EXT.test(a.href)) {
+      a.href = accelUrl(a.href, DEFAULT_PROXY);
     }
   }
 
-  // mousedown：处理所有"下载型"链接（releases/archive/raw/gist raw），提前替换
-  document.addEventListener('mousedown', preDownload, true);
-  // click：兜底处理未在 mousedown 拦截的（如键盘 Enter），以及"页面型"链接（仅整页导航时改写）
-  document.addEventListener('click', rewrite, true);
-  // 导航兜底：mousedown 改写后若未导航，补发下载（针对下载型，不影响页面型）。
-  // 场景举例：点 raw 链接 → mousedown 改成加速地址 → 但浏览器可能已按原地址进入下载，
-  // 导致当前页面文档没有卸载，此时代码补发一次下载，保证文件一定从加速域拿到。
-  document.addEventListener('click', ensureDownload, true);
+  document.addEventListener('mousedown', onMouseDown, true);
+  document.addEventListener('click', onClick, true);
 
   // ===== 油猴菜单：一键开关 =====
   let menuId = null;
@@ -146,10 +234,9 @@
     if (menuId !== null) {
       try { GM_unregisterMenuCommand(menuId); } catch (e) { /* 旧版管理器不支持则忽略 */ }
     }
-    const on = isOn();
     menuId = GM_registerMenuCommand(
-      (on ? '✔ ' : '✘ ') + 'GitHub 下载加速已' + (on ? '启用' : '停用') + '（点击切换）',
-      () => { GM_setValue('accel_enabled', !on); syncMenu(); }
+      (enabled ? '✔ ' : '✘ ') + 'GitHub 下载加速已' + (enabled ? '启用' : '停用') + '（点击切换）',
+      () => { enabled = !enabled; GM_setValue('accel_enabled', enabled); syncMenu(); }
     );
   }
   syncMenu();
