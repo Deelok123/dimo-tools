@@ -1,13 +1,9 @@
 // ==UserScript==
 // @name              手机视频脚本
 // @description       全屏横屏、快进快退、长按倍速，对各种视频网站的兼容性很强。适用于谷歌内核的浏览器。使用前请先关闭同类横屏或手势脚本，以避免冲突。
-// @version      1.9.7
+// @version      1.9.10
 // @author       shopkeeperV
 // @match        *://*/*
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_registerMenuCommand
-// @grant        GM_addStyle
 // @run-at       document-idle
 // @namespace https://greasyfork.org/users/452911
 // ==/UserScript==
@@ -67,6 +63,10 @@
             box-shadow: var(--me-shadow) !important;
             color: var(--me-fg) !important;
         }
+
+        /* 容器是 BODY/HTML 时用 fixed，免得元素跟着文档滚走。
+           注意必须用 class：这里的 position 带 !important，内联样式压不过它 */
+        .me-fixed { position: fixed !important; }
 
         .me-icon { display: block; width: 18px; height: 18px; flex: none; }
         .me-icon path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -178,14 +178,17 @@
             transform: translateY(28px);
         }
         .me-speed-sheet.me-bottom.me-open { visibility: visible !important; opacity: 1 !important; transform: translateY(0) !important; }
+        /* 横屏：居中面板 + 网格排布，18 个选项一屏放得下，不用滚动 */
         .me-speed-sheet.me-side {
-            right: 12px !important; top: 50% !important;
-            width: 96px !important;
-            padding: 10px !important;
-            max-height: 78vh !important;
-            transform: translate(0, -50%) translateX(28px);
+            left: 50% !important; right: auto !important;
+            top: 50% !important; bottom: auto !important;
+            width: auto !important;
+            max-width: 94vw !important;
+            max-height: 88vh !important;
+            padding: 2px 16px 16px !important;
+            transform: translate(-50%, -50%) scale(0.92);
         }
-        .me-speed-sheet.me-side.me-open { visibility: visible !important; opacity: 1 !important; transform: translate(0, -50%) translateX(0) !important; }
+        .me-speed-sheet.me-side.me-open { visibility: visible !important; opacity: 1 !important; transform: translate(-50%, -50%) scale(1) !important; }
 
         .me-sheet-grabber { width: 34px; height: 4px; border-radius: 2px; background: var(--me-fg-3); margin: 8px auto 2px; }
         .me-sheet-head {
@@ -194,11 +197,15 @@
         }
         .me-sheet-title { font-size: 15px !important; font-weight: 700 !important; color: var(--me-fg) !important; }
         .me-sheet-now { font-size: 13px !important; font-weight: 600 !important; color: var(--me-accent) !important; font-variant-numeric: tabular-nums; }
-        .me-speed-sheet.me-side .me-sheet-head { flex-direction: column !important; gap: 2px; align-items: flex-start !important; }
+        .me-speed-sheet.me-side .me-sheet-head { padding: 14px 2px 12px; }
         .me-speed-sheet.me-side .me-sheet-grabber { display: none !important; }
 
         .me-sheet-options { display: flex !important; flex-wrap: wrap !important; gap: 8px !important; justify-content: center !important; }
-        .me-speed-sheet.me-side .me-sheet-options { flex-direction: column !important; flex-wrap: nowrap !important; }
+        .me-speed-sheet.me-side .me-sheet-options {
+            display: grid !important;
+            grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+            gap: 8px !important;
+        }
 
         .me-speed-item {
             min-width: 60px !important;
@@ -217,7 +224,7 @@
             cursor: pointer;
             transition: background 0.15s var(--me-ease), transform 0.1s var(--me-ease) !important;
         }
-        .me-speed-sheet.me-side .me-speed-item { min-width: 0 !important; width: 100% !important; padding: 0 !important; }
+        .me-speed-sheet.me-side .me-speed-item { min-width: 0 !important; width: auto !important; padding: 0 6px !important; }
         .me-speed-item:active { transform: scale(0.94) !important; }
         .me-speed-item.me-active {
             background: var(--me-accent) !important;
@@ -232,7 +239,9 @@
 
     let ensureStyles = function () {
         if (meStyleElement) return meStyleElement;
-        meStyleElement = GM_addStyle(ME_STYLES);
+        meStyleElement = document.createElement("style");
+        meStyleElement.textContent = ME_STYLES;
+        (document.head || document.documentElement).appendChild(meStyleElement);
         return meStyleElement;
     };
 
@@ -249,25 +258,12 @@
         return video && video.videoWidth > 0 && video.videoHeight > 0;
     };
 
-    let applySavedRate = function (video) {
-        if (!hasVideoResolution(video)) return;
-
-        // 只有用户显式开启“新视频自动应用记忆倍速”时才动倍速。
-        // 关闭时一律不干预，否则会把网页自己或用户自己调的倍速反复改回去，表现就是“无法控制”。
-        if (settings.autoApplyRateV2 !== true) return;
-
-        let lastRate = GM_getValue("lastRate") || settings.lastRate;
-        if (lastRate && video.playbackRate !== lastRate) {
-            video.playbackRate = lastRate;
-        }
-    };
-
     let clearLongPressTimers = function () {
         if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
         if (longPressBackTimer) { clearTimeout(longPressBackTimer); longPressBackTimer = null; }
     };
 
-    // 结束长按：恢复倍速和控制条。幂等，所有收尾路径都可以反复调用
+    // 结束长按：恢复长按前的倍速和控制条。幂等，所有收尾路径都可以反复调用
     let endLongPress = function (video) {
         if (!video || !video.getAttribute("is_long_pressing")) return false;
         if (activeLongPressVideo === video) activeLongPressVideo = null;
@@ -276,12 +272,8 @@
             video.controls = video.__meControlsBeforeLongPress;
             delete video.__meControlsBeforeLongPress;
         }
-        if (settings.autoApplyRateV2 === true || video.getAttribute("is_manually_set")) {
-            video.playbackRate = GM_getValue("lastRate") || settings.lastRate;
-        } else {
-            video.playbackRate = 1;
-        }
-        if (!hasVideoResolution(video)) video.playbackRate = 1;
+        video.playbackRate = video.__meRateBeforeLongPress !== undefined ? video.__meRateBeforeLongPress : 1;
+        delete video.__meRateBeforeLongPress;
         return true;
     };
 
@@ -301,12 +293,6 @@
         }
     };
 
-    // 后加进来的视频靠媒体事件抓（capture 阶段就能收到），同样不需要 MutationObserver
-    let onMediaReady = function (e) {
-        let node = e.target;
-        if (node && node.tagName === "VIDEO") applySavedRate(node);
-    };
-
     // 页面真的有视频/iframe 时才做的初始化，而且只做一次
     let preparePage = function () {
         if (pagePrepared) return;
@@ -314,9 +300,6 @@
         pagePrepared = true;
         ensureStyles();
         syncIframes();
-        if (settings.autoApplyRateV2 === true) {
-            for (let video of videos) applySavedRate(video);
-        }
     };
 
     let listenTarget = document;
@@ -328,29 +311,14 @@
     });
     window.addEventListener("blur", restoreStuckLongPress);
 
-    let settings = {
-        voiced: true,
-        speed: true,
-        rate: 3,
-        sensitivity1: 0.5,
-        threshold: 300,
-        sensitivity2: 0.2,
-        lastRate: 1,
-        // 旧版叫 autoApplyRate 且默认为 true，会把记忆倍速强行套到每个视频上（记过 10 倍速就永远 10 倍速）。
-        // 换成新键名重新开始，默认关闭，需要的人在菜单里开启即可
-        autoApplyRateV2: false
-    }
-    
-    for (let settingsKey in settings) {
-        let value = GM_getValue(settingsKey);
-        if (value == undefined) {
-            GM_setValue(settingsKey, settings[settingsKey]);
-        } else settings[settingsKey] = value;
-    }
-
-    // 媒体事件用 capture 挂在 document 上：后加进来的视频也抓得到，页面上没视频时零开销
-    document.addEventListener("loadedmetadata", onMediaReady, true);
-    document.addEventListener("play", onMediaReady, true);
+    // 固定参数：设置项和菜单已经删掉，行为全部按这里的默认值来
+    const settings = {
+        speed: true,         // 显示倍速浮标
+        rate: 3,             // 长按倍速
+        sensitivity1: 0.5,   // 长视频滑动灵敏度
+        threshold: 300,      // 短视频阈值（秒）
+        sensitivity2: 0.2    // 短视频滑动灵敏度
+    };
 
     // 真正的初始化推迟到浏览器空闲时做；页面没有视频的话 preparePage 会立刻返回
     if (typeof requestIdleCallback === "function") {
@@ -359,47 +327,9 @@
         setTimeout(preparePage, 1000);
     }
 
-    if (window === top && !window.meVideoMenuRegistered) {
-        window.meVideoMenuRegistered = true; 
-
-        function registerBoolean(btnName, key) {
-            GM_registerMenuCommand(btnName, () => {
-                try {
-                    let currentValue = GM_getValue(key) !== false;
-                    GM_setValue(key, !currentValue);
-                    settings[key] = !currentValue;
-                    alert(`成功${!currentValue ? "开启" : "关闭"}。`);
-                } catch (e) { alert("浏览器bug捕获，刷新页面后重试。"); }
-            });
-        }
-
-        function registerInput(btnName, description, key, integer, minimum, maximum) {
-            GM_registerMenuCommand(btnName, () => {
-                let input = window.prompt(description, settings[key]);
-                if (input === null) return;
-                input = Number(input);
-                if (input && input > minimum && input <= maximum) {
-                    if (integer && !Number.isInteger(input)) { alert("要求整数！"); return; }
-                    try {
-                        GM_setValue(key, input);
-                        settings[key] = input;
-                    } catch (e) { alert("浏览器bug捕获，刷新页面后重试。"); }
-                } else { alert("输入错误！"); }
-            });
-        }
-
-        registerBoolean("开关【新视频自动应用记忆倍速】", "autoApplyRateV2");
-        registerBoolean("开关【触摸视频时取消静音】", "voiced");
-        registerBoolean("开关【显示播放速度调整按钮】", "speed");
-        registerInput("修改长按倍速数值", "请指定需要的倍率，输入0-16的数字即可，可以是小数。", "rate", false, 0, 16);
-        registerInput("修改长视频滑动灵敏度", "默认为0.5，可依需求增减，要求0-3之间。", "sensitivity1", false, 0, 3);
-        registerInput("修改短视频阈值", "默认300秒，小于此时长的使用短视频滑动灵敏度。", "threshold", true, 0, 36000);
-        registerInput("修改短视频滑动灵敏度", "默认为0.2，可依需求增减，要求0-3之间。", "sensitivity2", false, 0, 3);
-        registerInput("修改默认/记忆播放速度", "指定默认播放速度(0-16)", "lastRate", false, 0, 16);
-    }
-
     function formatTime(seconds) {
-        if (isNaN(seconds) || seconds < 0) return "00:00";
+        // 直播的 duration 是 Infinity，旧写法会显示出 “Infinity:NaN:NaN”
+        if (!isFinite(seconds) || seconds < 0) return "--:--";
         let h = Math.floor(seconds / 3600);
         let m = Math.floor((seconds % 3600) / 60);
         let s = Math.floor(seconds % 60);
@@ -416,6 +346,14 @@
         return (Math.round(value * 100) / 100) + "×";
     }
 
+    // 容器是 BODY/HTML 时改用 fixed 定位，避免元素跟着文档滚走
+    function anchorMode(container, element) {
+        if (container.tagName === "BODY" || container.tagName === "HTML") {
+            element.classList.add("me-fixed");
+        }
+        return element;
+    }
+
     // ---- 全屏按钮：Miuix 胶囊 + 线性图标 ----
     function showFullscreenButton(componentContainer, videoElement) {
         if (!componentContainer || !videoElement) return;
@@ -426,9 +364,7 @@
         if (!btn) {
             btn = document.createElement("div");
             btn.className = "me-fullscreen-btn me-ui-base me-glass";
-            if (componentContainer.tagName === "BODY" || componentContainer.tagName === "HTML") {
-                btn.style.position = "fixed";
-            }
+            anchorMode(componentContainer, btn);
             btn.innerHTML = `<svg class="me-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V5.6A1.6 1.6 0 0 1 5.6 4H9"></path><path d="M15 4h3.4A1.6 1.6 0 0 1 20 5.6V9"></path><path d="M20 15v3.4a1.6 1.6 0 0 1-1.6 1.6H15"></path><path d="M9 20H5.6A1.6 1.6 0 0 1 4 18.4V15"></path></svg><span>全屏</span>`;
             componentContainer.append(btn);
             const goFullscreen = async (e) => {
@@ -466,10 +402,24 @@
     function createSpeedSheet(container, video) {
         const scrim = document.createElement("div");
         scrim.className = "me-sheet-scrim me-ui-base";
+        // 只有“轻点”才关闭。原来 touchstart 就关，而横屏面板窄、手指滑动时
+        // 常常压在面板外面，结果一滑面板就没了
+        let scrimStartX = 0, scrimStartY = 0;
         scrim.addEventListener("touchstart", (e) => {
-            e.stopPropagation();
-            closeSpeedSheet(container);
+            const t = e.touches[0];
+            if (t) { scrimStartX = t.clientX; scrimStartY = t.clientY; }
         }, {passive: true});
+        scrim.addEventListener("touchend", (e) => {
+            const t = e.changedTouches[0];
+            if (!t) return;
+            if (Math.abs(t.clientX - scrimStartX) < 12 && Math.abs(t.clientY - scrimStartY) < 12) {
+                e.stopPropagation();
+                closeSpeedSheet(container);
+            }
+        }, {passive: true});
+        // 注意：这里不能监听 click。手机上点浮标打开面板后，浏览器还会补一个合成 click，
+        // 落点正好是刚显示的遮罩 → 面板会“刚打开就消失”
+        anchorMode(container, scrim);
         container.appendChild(scrim);
 
         const sheet = document.createElement("div");
@@ -483,14 +433,20 @@
             item.className = "me-speed-item";
             item.dataset.rate = value;
             item.textContent = formatRate(value);
+            let pressX = 0, pressY = 0;
             item.addEventListener("touchstart", (e) => {
+                e.stopPropagation();
+                const t = e.touches[0];
+                if (t) { pressX = t.clientX; pressY = t.clientY; }
+            }, {passive: true});
+            item.addEventListener("touchend", (e) => {
+                const t = e.changedTouches[0];
+                // 只有轻点才生效。改成 touchstart 就生效的话，手指按在选项上滑动会立刻误选并关闭面板
+                if (t && (Math.abs(t.clientX - pressX) > 12 || Math.abs(t.clientY - pressY) > 12)) return;
                 e.stopPropagation();
                 let target = sheet.__video;
                 if (!target) return;
-                target.setAttribute("is_manually_set", "true");
                 target.playbackRate = value;
-                GM_setValue("lastRate", value);
-                settings.lastRate = value;
                 closeSpeedSheet(container);
                 // 有些播放器会在几毫秒后把倍速改回去，这里补一次
                 setTimeout(() => {
@@ -499,6 +455,7 @@
             }, {passive: true});
             options.appendChild(item);
         });
+        anchorMode(container, sheet);
         container.appendChild(sheet);
         return sheet;
     }
@@ -515,7 +472,8 @@
         sheet.classList.toggle("me-side", landscape);
         sheet.classList.toggle("me-bottom", !landscape);
 
-        const currentRate = GM_getValue("lastRate") || settings.lastRate || video.playbackRate;
+        // 当前倍速就是视频现在的倍速（不再有“记忆倍速”这一说）
+        const currentRate = video.playbackRate;
         sheet.querySelector(".me-sheet-now").textContent = formatRate(video.playbackRate);
         sheet.querySelectorAll(".me-speed-item").forEach(item => {
             item.classList.toggle("me-active", parseFloat(item.dataset.rate) === currentRate);
@@ -542,7 +500,6 @@
             endY: 0,
             isMoving: false,
             isLongPress: false,
-            isPureClick: false,
             videoElement: null,
             componentContainer: null,
             notice: null,
@@ -562,13 +519,16 @@
             if (iframes.length) syncIframes();
             if (!videos.length) return;
 
+            // 落在自己 UI（倍速面板/遮罩/浮标/全屏按钮）上的触摸不算视频手势，
+            // 否则在面板里滑动会误触长按、快进，还会把提示条塞进面板里
+            if (e.target && e.target.closest && e.target.closest(".me-speed-sheet, .me-sheet-scrim, .me-speed-btn, .me-fullscreen-btn, .me-notice")) return;
+
             preparePage();
             // 上一次触摸如果没收到 touchend/touchcancel，先把它留下的加速状态清干净
             restoreStuckLongPress();
 
             touchState.isMoving = false;
             touchState.isLongPress = false;
-            touchState.isPureClick = false;
             touchState.direction = 0;
             touchState.timeChange = 0;
 
@@ -578,15 +538,18 @@
             const gestureId = ++touchState.gestureId;
             touchState.gestureActive = true;
             
-            let screenX = e.touches[0].screenX;
-            let screenY = e.touches[0].screenY;
+            // 全屏时避开屏幕最外圈 5%（系统手势区）。这里必须用视口坐标：
+            // screenX/screenY 是相对物理屏幕的，会带上窗口/视觉视口的偏移，
+            // 横屏旋转后也容易错位，导致正常触摸被误判成"落在边缘"而失效
+            let startX = Math.ceil(e.touches[0].clientX);
+            let startY = Math.ceil(e.touches[0].clientY);
             if (document.fullscreenElement) {
-                if (screenX < screen.width * 0.05 || screenX > screen.width * 0.95 ||
-                    screenY < screen.height * 0.05 || screenY > screen.height * 0.95) return;
+                if (startX < window.innerWidth * 0.05 || startX > window.innerWidth * 0.95 ||
+                    startY < window.innerHeight * 0.05 || startY > window.innerHeight * 0.95) return;
             }
-            
-            touchState.startX = Math.ceil(e.touches[0].clientX);
-            touchState.startY = Math.ceil(e.touches[0].clientY);
+
+            touchState.startX = startX;
+            touchState.startY = startY;
             touchState.endX = touchState.startX;
             touchState.endY = touchState.startY;
             touchState.touchIdentifier = e.touches[0].identifier;
@@ -644,9 +607,7 @@
             if (!touchState.notice) {
                 touchState.notice = document.createElement("div");
                 touchState.notice.className = "me-notice me-ui-base me-glass";
-                if (touchState.componentContainer.tagName === "BODY" || touchState.componentContainer.tagName === "HTML") {
-                    touchState.notice.style.position = "fixed";
-                }
+                anchorMode(touchState.componentContainer, touchState.notice);
                 touchState.notice.innerHTML = `<svg class="me-icon me-notice-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 6l6 6-6 6"></path><path d="M13.5 6l6 6-6 6"></path></svg><span class="me-notice-value"></span><span class="me-notice-sub"></span>`;
                 touchState.noticeValue = touchState.notice.querySelector(".me-notice-value");
                 touchState.noticeSub = touchState.notice.querySelector(".me-notice-sub");
@@ -665,17 +626,18 @@
                 if (!hasVideoResolution(videoElement)) return;
 
                 if (touchState.playing && videoElement.paused) {
-                    videoElement.play();
+                    videoElement.play().catch(() => {});
                 }
 
                 longPressBackTimer = setTimeout(() => {
-                    let currentRateSetting = GM_getValue("lastRate") || settings.lastRate;
-                    if (videoElement.playbackRate === currentRateSetting) {
+                    // 有的播放器会把倍速改回去，这里再补一次
+                    if (videoElement.playbackRate !== settings.rate) {
                         videoElement.playbackRate = settings.rate;
                     }
                 }, 500);
 
                 videoElement.__meControlsBeforeLongPress = videoElement.controls;
+                videoElement.__meRateBeforeLongPress = videoElement.playbackRate;
                 videoElement.setAttribute("is_long_pressing", "true");
                 videoElement.playbackRate = settings.rate;
                 videoElement.controls = false;
@@ -689,6 +651,7 @@
                     speedBtn = document.createElement("div");
                     speedBtn.className = "me-speed-btn me-ui-base me-glass";
                     speedBtn.innerHTML = `<span class="me-speed-dot"></span><span class="me-speed-label"></span>`;
+                    anchorMode(touchState.componentContainer, speedBtn);
                     touchState.componentContainer.appendChild(speedBtn);
                     // 点浮标打开倍速面板
                     speedBtn.addEventListener("touchstart", (event) => {
@@ -738,8 +701,15 @@
             function touchmoveHandler(moveEvent) {
                 if (touchState.gestureId !== gestureId || !touchState.gestureActive) return;
 
-                // 手指一动就不算长按了，定时器全部撤掉
-                clearLongPressTimers();
+                // 只有手指明显移动了才撤销长按：按住不动时轻微抖动也会产生 touchmove，
+                // 原来一律撤销，长按就很容易“不灵”
+                let movingTouch = (moveEvent.touches.length === 1) ? moveEvent.touches[0] : null;
+                if (!movingTouch || movingTouch.identifier !== touchState.touchIdentifier) {
+                    clearLongPressTimers();
+                } else if (Math.abs(Math.ceil(movingTouch.clientX) - touchState.startX) > 10 ||
+                           Math.abs(Math.ceil(movingTouch.clientY) - touchState.startY) > 10) {
+                    clearLongPressTimers();
+                }
 
                 if (moveEvent.touches.length === 1 && moveEvent.touches[0].identifier === touchState.touchIdentifier) {
                     let tempX = Math.ceil(moveEvent.touches[0].clientX);
@@ -797,25 +767,17 @@
                 touchState.gestureActive = false;
                 clearLongPressTimers();
 
-                const diffX = Math.abs(touchState.endX - touchState.startX);
-                const diffY = Math.abs(touchState.endY - touchState.startY);
-                const isPureClickLocal = diffX < 10 && diffY < 10 && !touchState.isMoving && !touchState.isLongPress;
-                
                 if (touchState.notice) {
                     touchState.notice.classList.remove("me-show");
-                }
-                
-                if (settings.voiced && touchState.videoElement) {
-                    touchState.videoElement.muted = false;
                 }
                 
                 if (!touchState.isLongPress && touchState.videoElement && touchState.videoElement.controls && !document.fullscreenElement) {
                     showFullscreenButton(touchState.componentContainer, touchState.videoElement);
                 }
-                
+
                 if (touchState.isMoving && touchState.playing && touchState.videoElement.paused && !touchState.maybeTiktok) {
                     setTimeout(() => {
-                        touchState.videoElement.play();
+                        touchState.videoElement.play().catch(() => {});
                     }, 500);
                 }
                 
@@ -836,13 +798,19 @@
         }, {capture: true, passive: true});
     }
 
-    window.tempLock = screen.orientation.lock.bind(screen.orientation);
-    screen.orientation.lock = async function () { console.log("网页自带js试图执行lock()。"); };
-    
+    // 有的浏览器没有 screen.orientation.lock（iOS Safari、部分桌面浏览器），
+    // 原来的写法会在这里直接抛异常，把脚本后面的初始化全打断
+    let nativeOrientationLock = (screen.orientation && typeof screen.orientation.lock === "function")
+        ? screen.orientation.lock.bind(screen.orientation)
+        : function () { return Promise.resolve(); };
+    if (screen.orientation) {
+        screen.orientation.lock = async function () { console.log("网页自带js试图执行lock()。"); };
+    }
+
     if (top === window) {
         window.addEventListener("message", async (e) => {
             if (typeof e.data === 'string' && e.data.includes("MeVideoJS") && document.fullscreenElement) {
-                await window.tempLock("landscape");
+                try { await nativeOrientationLock("landscape"); } catch (err) {}
             }
         });
     }
@@ -865,8 +833,9 @@
         if (videoElement) {
             let changeHandler = async function () {
                 if (videoElement.videoHeight < videoElement.videoWidth) {
-                    if (top === window) await window.tempLock("landscape");
-                    else top.postMessage("MeVideoJS", "*");
+                    if (top === window) {
+                        try { await nativeOrientationLock("landscape"); } catch (err) {}
+                    } else top.postMessage("MeVideoJS", "*");
                 }
             };
             if (videoElement.readyState < 1) videoElement.addEventListener("loadedmetadata", changeHandler, {once: true});
