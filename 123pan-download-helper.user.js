@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         123云盘下载优化
 // @namespace    https://github.com/yourname/userscripts
-// @version      1.8.3
+// @version      1.8.5
 // @description  分享页点下载自动"保存到自己网盘→取直链→触发下载"（不跳转页面，MIUIX风格进度提示）；屏蔽客户端下载/二维码/横幅/广告/SVIP徽章、删免责声明；未登录弹登录窗；阻止剪切板写入和客户端跳转。接口/DOM 多候选回退，抗网站改版（桌面端+移动端）
 // @author       you
 // @match        *://*.123pan.cn/*
@@ -296,12 +296,15 @@
         enabled: true,
 
         // ---- 接口路径（多候选，逐个回退；网站改路径时在对应数组里补一条即可） ----
+        // 注意：网盘类接口在分享页的路径已由 /b/api/... 改为 /api/...
+        //      并且 /b/api/file/list（旧接口）现在会返回 HTTP 200 + code 0 + 空列表的"假成功"，
+        //      会骗过回退逻辑导致流程拿不到文件，故绝不能放进候选。
         paths: {
             shareList: ['/api/share/get', '/api/share/list'],
             save: ['/api/restful/goapi/v1/file/copy/save', '/api/file/copy/save'],
             saveGet: ['/api/restful/goapi/v1/file/copy/save/get'],
-            driveList: ['/b/api/file/list/new', '/b/api/file/list'],
-            downloadInfo: ['/b/api/file/download_info', '/b/api/file/download/info']
+            driveList: ['/api/file/list/new', '/b/api/file/list/new'],
+            downloadInfo: ['/api/file/download_info', '/b/api/file/download_info']
         },
 
         // ---- 鉴权（localStorage 键名候选 + app-version） ----
@@ -646,20 +649,46 @@
         });
     }
 
-    // 触发浏览器下载
-    // 重要：123云盘返回的 DownloadUrl 是"下载中转页"（web-pro2.123952.com/download-v2/?params=...），
-    // 它内部会 decodeURI(atob(params)) 解出真实直链、再 click 一个 <a> 触发下载，
-    // 并用 window.parent.postMessage 上报状态——说明它天生就该跑在 iframe 里。
-    // 若直接用 <a> 点击，浏览器会把"当前页"导航到中转页 → 用户看到空白页。
-    // 所以这里用隐藏 iframe 加载，当前页完全不受影响。
+    // 把接口给的"下载中转页"地址解析成"真实可下载直链"
+    // 背景：接口返回的 DownloadUrl 形如
+    //     https://web-pro2.123952.com/download-v2/?params=<base64>
+    //   这个中转域名会失效（实测已 NXDOMAIN），但 base64 里的 CDN 地址是好的。
+    //   中转页本身做的事就是：解 base64 → 请求 → 取 redirect_url → 点 <a>。
+    //   这里自己来做，避免依赖会失效的中转域名：
+    //     1) 从 params 解出 CDN 地址
+    //     2) 该地址返回 210 + {"data":{"redirect_url":...}}，取里面的最终地址
+    //     3) 最终地址带 Content-Disposition: attachment，可直接下载
+    function resolveDirectUrl(landingUrl) {
+        var params = null;
+        try { params = new URL(landingUrl, location.href).searchParams.get('params'); } catch (e) { /* 非中转页地址 */ }
+        if (!params) return Promise.resolve(landingUrl);   // 本来就是直链
+
+        var cdn;
+        try { cdn = decodeURI(atob(params)); } catch (e) { return Promise.resolve(landingUrl); }
+
+        return fetch(cdn, { credentials: 'omit' })
+            .then(function (r) { return r.text(); })
+            .then(function (t) {
+                try {
+                    var j = JSON.parse(t);
+                    if (j && j.data && j.data.redirect_url) return j.data.redirect_url;
+                } catch (e) { /* 不是 JSON，说明这个地址本身就是文件 */ }
+                return cdn;
+            })
+            .catch(function () { return cdn; });
+    }
+
+    // 触发浏览器下载（解析出直链后点 <a>；直链带 attachment，不会跳转当前页）
     function triggerDownload(url) {
-        var f = document.createElement('iframe');
-        f.setAttribute('aria-hidden', 'true');
-        f.style.cssText = 'position:absolute;width:0;height:0;border:0;visibility:hidden;';
-        f.src = url;
-        (document.body || document.documentElement).appendChild(f);
-        // 真实下载由中转页在 iframe 内触发；稍后回收 iframe
-        setTimeout(function () { if (f.parentNode) f.parentNode.removeChild(f); }, 180000);
+        return resolveDirectUrl(url).then(function (direct) {
+            var a = document.createElement('a');
+            a.href = direct;
+            a.rel = 'noopener';
+            a.style.display = 'none';
+            (document.body || document.documentElement).appendChild(a);
+            a.click();
+            setTimeout(function () { if (a.parentNode) a.parentNode.removeChild(a); }, 5000);
+        });
     }
 
     // 主流程：准备 → 保存到网盘 → 取直链 → 逐个触发下载（带进度）
@@ -692,16 +721,21 @@
                             var nm = f.FileName || f.fileName || f.name;
                             if (nm) byName[nm] = f;
                         });
-                        var i = 0;
+                        var i = 0, done = 0, missing = 0;
                         (function next() {
-                            if (i >= files.length) { UI.ok('已触发 ' + files.length + ' 个下载'); return; }
+                            if (i >= files.length) {
+                                // 明确区分成功/失败，避免"静默失败"（接口变动时看不出问题）
+                                if (done) UI.ok('已触发 ' + done + ' 个下载' + (missing ? '（' + missing + ' 个未找到）' : ''));
+                                else UI.err('下载失败：保存后在网盘里没找到文件（接口可能又变了）');
+                                return;
+                            }
                             var src = files[i++];
                             var srcName = src.FileName || src.fileName || src.name;
                             var saved = byName[srcName];
                             UI.progress('获取直链并下载…（' + i + '/' + files.length + '）', 65 + (i / files.length) * 33);
-                            if (!saved) { setTimeout(next, 300); return; }
+                            if (!saved) { missing++; setTimeout(next, 300); return; }
                             apiGetDownloadUrl(saved).then(function (u) {
-                                if (u) triggerDownload(u);
+                                if (u) { triggerDownload(u); done++; }
                                 setTimeout(next, 1500);
                             }).catch(function () { setTimeout(next, 600); });
                         })();
